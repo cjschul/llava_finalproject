@@ -2,6 +2,7 @@ from transformers import LlamaModel, PreTrainedModel
 from transformers.tokenization_utils_base import BatchEncoding
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 import torch.nn as nn
+import torch
 
 class vicuna_llava(PreTrainedModel):
     def __init__(self, config):
