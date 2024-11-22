@@ -1,0 +1,5 @@
+*.jpg
+*.json
+CC3M/
+.vscode/
+__pycache__
