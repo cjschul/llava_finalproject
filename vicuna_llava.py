@@ -51,9 +51,7 @@ class vicuna_llava(LlamaForCausalLM):
         proc_im = self.im_processor(image, return_tensors='pt')
         return self.clipvisionmodel(**proc_im).last_hidden_state
 
-    def forward(self, image:Tensor, 
-                prompt:str,
-                batch_size=1):
+    def forward(self, image:Tensor, prompt:str, batch_size=1):
         with torch.no_grad():
             # tokenize prompt
             tokenized_pr = self.tokenize(prompt)
@@ -77,7 +75,7 @@ class vicuna_llava(LlamaForCausalLM):
 
         # concatenate attention masks
         im_and_pr_attention_mask = torch.cat((tokenized_pr_attention_mask[:,[0]], 
-                                            torch.ones(batch_size,projected_im.size()[1]), 
+                                            torch.zeros(batch_size,projected_im.size()[1]), 
                                             tokenized_pr_attention_mask[:,1:]),dim=1)
             
         
