@@ -11,6 +11,7 @@ import json
 import os
 from torchvision.io import read_image
 import numpy as np
+from huggingface_hub import PyTorchModelHubMixin
 
 class vicuna_llava(LlamaForCausalLM):
     def __init__(self, config, llmURL="lmsys/vicuna-7b-v1.5", clipvisionmodelURL="openai/clip-vit-large-patch14", accelerator=Accelerator()):
@@ -21,7 +22,8 @@ class vicuna_llava(LlamaForCausalLM):
         self.im_processor = self.accelerator.prepare(CLIPImageProcessor.from_pretrained(clipvisionmodelURL))
         self.clipvisionmodel = self.accelerator.prepare(CLIPVisionModel.from_pretrained(clipvisionmodelURL))
         self.tokenizer = self.accelerator.prepare(AutoTokenizer.from_pretrained(llmURL))
-        self.special_tokens_dict = {"additional_special_tokens": ["<image>", "###", "/n", "<Human>", "<Assistant>"], "pad_token":"[PAD]"}
+        self.special_tokens_dict = {"additional_special_tokens": ["<image>", "###", "/n", "<Human>", "<Assistant>"], 
+                                    "pad_token":"[PAD]"}
         self.num_added_tokens = self.tokenizer.add_special_tokens(self.special_tokens_dict)
         if self.num_added_tokens > 0:
             with torch.no_grad():
