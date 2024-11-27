@@ -12,8 +12,11 @@ import os
 from torchvision.io import read_image
 import numpy as np
 from huggingface_hub import PyTorchModelHubMixin
+from typing import Literal
+from tqdm.auto import tqdm
+import traceback
 
-class vicuna_llava(LlamaForCausalLM):
+class vicuna_llava(LlamaForCausalLM, PyTorchModelHubMixin, object):
     def __init__(self, config, llmURL="lmsys/vicuna-7b-v1.5", clipvisionmodelURL="openai/clip-vit-large-patch14", accelerator=Accelerator()):
         super().__init__(config)
 
@@ -133,12 +136,83 @@ class vicuna_llava(LlamaForCausalLM):
             pred_token = self.tokenizer.decode(pred_token_id)
 
             pred_tokens+=pred_token
-            if pred_token_id == eos_token:
+            if pred_token == eos_token:
                 break
 
             num_tokens+=1
 
         return pred_tokens
+
+    def staged_training(self, dataloader, stage:Literal[1,2], 
+                        num_epochs:int, batch_size:int,
+                        grad_accu_steps:int, optimizer, 
+                        lr_scheduler, save_results=False, 
+                        push_to_hub=False, hf_user=None):
+
+        # setup progress bar
+        num_batch_steps = num_epochs*len(dataloader)
+        progress_bar=tqdm(range(int(num_batch_steps)))
+
+        # set which gradients to compute base on stage input
+        #   stage 1 only updates im_embedding
+        #   stage 2 updates entire model
+        for param in iter(self.parameters()):
+            param.requires_grad = False if stage == 1 else True
+        for param in iter(self.model.parameters()):
+            param.requires_grad = False if stage == 1 else True
+        for param in iter(self.im_embedding.parameters()):
+            param.requires_grad = True
+
+
+        # start training
+        self.losses = []
+        self.train()
+        try:
+            for i in range(num_epochs):
+                batchiter = 0
+
+                for batchprompt,batchimage,batchresp in dataloader:
+                    # concatenate prompt and response, process and tokenize
+                    input = [batchprompt[j]+'###'+batchresp[j] for j in range(len(batchprompt))]
+                    input = self.process_prompt(input)
+                    tokenized_input = self.tokenize(input)
+
+                    # forward pass through model, measure loss
+                    outs = self.forward(batchimage, input, batch_size=batch_size)
+                    loss = outs['loss']/grad_accu_steps
+
+                    # append loss, update batchiter, progress bar, compute backprop
+                    self.losses.append(loss)
+                    self.accelerator.backward(loss)
+                    batchiter+=1
+                    progress_bar.update(1)
+                    
+                    # after grad_accu_steps update model
+                    if batchiter%grad_accu_steps==0:
+                        optimizer.step()
+                        lr_scheduler.step()
+                        optimizer.zero_grad()
+                        print(f"batchiter:{batchiter}, loss:{loss}")
+
+                    # during stage 1, if save_results, save im_embedding every 10 batchiters
+                    if batchiter%10==0 & save_results & stage==1:
+                        torch.save(self.im_embedding, 'llamallava_im_embedding_stage1.pt')
+                    # if save_results, save entire model every 500 batchiters
+                    if batchiter%500==0 & save_results:
+                        self.save_pretrained(f"ece598-llamallava-stage{stage}")
+            # after computation, if save_results and/or push_to_hub, save/upload model
+            if save_results:
+                self.save_pretrained(f"ece598-llamallava-stage{stage}")
+            if push_to_hub:
+                self.push_to_hub(f"{hf_user}/ece598-llamallava-stage{stage}")
+
+        # in case of error, print error and save/upload model
+        except:
+            traceback.print_exc()
+            if save_results:
+                self.save_pretrained(f"ece598-llamallava-stage{stage}")
+            if push_to_hub:
+                self.push_to_hub(f"{hf_user}/ece598-llamallava-stage{stage}")
 
 
 
