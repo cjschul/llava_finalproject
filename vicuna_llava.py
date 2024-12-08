@@ -16,7 +16,7 @@ from typing import Literal
 from tqdm.auto import tqdm
 import traceback
 
-class vicuna_llava(LlamaForCausalLM, PyTorchModelHubMixin, object):
+class llava(LlamaForCausalLM, PyTorchModelHubMixin, object):
     def __init__(self, config, llmURL="lmsys/vicuna-7b-v1.5", clipvisionmodelURL="openai/clip-vit-large-patch14", accelerator=Accelerator()):
         super().__init__(config)
 
@@ -73,12 +73,23 @@ class vicuna_llava(LlamaForCausalLM, PyTorchModelHubMixin, object):
         
 
 
-    def forward(self, image:Tensor, prompt:str, batch_size=1):
+    def forward(self, image:Tensor, prompt:str, batch_size=1, encode_image=True):
 
         # tokenize prompt and extract image features
         with torch.no_grad():
             tokenized_pr = self.tokenize(prompt).to(self.device)
-            clip_encoded_im = self.vision_tower(image).to(self.device)
+
+            # this might look odd but it's just a brute force way of dealing with varying image sizes
+            # in batches, for LLaVA instruct dataset, I'm encoding the images before the forward pass
+            # in training so they have the same dimensions and can be batched easily
+            if encode_image:
+                clip_encoded_im = self.vision_tower(image).to(self.device)
+            else:
+                # this is not robust code, I'm squeezing the second dimension because using vision_tower
+                # before batching the images makes a 4 dimensional tensor because it adds the 'batch'
+                # dimension before I've even batched the images
+                clip_encoded_im = image.squeeze(1).to(self.device)
+
             tokenized_pr_input_ids = tokenized_pr['input_ids'].to(self.device)
             tokenized_pr_attention_mask = tokenized_pr['attention_mask'].to(self.device)
 
@@ -95,8 +106,9 @@ class vicuna_llava(LlamaForCausalLM, PyTorchModelHubMixin, object):
                                             tokenized_pr_attention_mask[:,1:]),dim=1).to(self.device)
             
         # send inputs through LLM, apply softmax to make outputs more clear
-        llama_output = self.model.forward(input_ids=embedded_im_and_pr,attention_mask=im_and_pr_attention_mask)
-        llama_output = torch.softmax(llama_output.logits, dim=2).to(self.device)
+        with autocast():
+            llama_output = self.model.forward(input_ids=embedded_im_and_pr,attention_mask=im_and_pr_attention_mask)
+            llama_output = torch.softmax(llama_output.logits, dim=2).to(self.device)
 
         # if we are training, compute causal language modeling loss
         if self.training:
@@ -110,7 +122,15 @@ class vicuna_llava(LlamaForCausalLM, PyTorchModelHubMixin, object):
                 # mask image and input prompt out of loss computation
                 im_loss_mask = torch.full_like(projected_im[:,:,0], -100)
                 labels = shifted_labels.clone()
-                labels[(labels == separator_token_id).cumsum(dim=1) == 0] = -100
+                #labels[(labels == separator_token_id).cumsum(dim=1) == 0] = -100
+                ignore = True
+                for batch in range(batch_size):
+                    for index, input_id in enumerate(labels[batch,:]):
+                        if input_id == separator_token_id:
+                            ignore = not ignore
+                        if ignore:
+                            labels[batch,index] = -100
+
                 lossmask = torch.cat((im_loss_mask, labels), dim=1).type(torch.LongTensor).to(self.device)
 
                 # compute loss, average loss over predicted response
@@ -130,7 +150,8 @@ class vicuna_llava(LlamaForCausalLM, PyTorchModelHubMixin, object):
         eos_token = self.tokenizer.special_tokens_map['eos_token']
         processed_prompt = self.process_prompt(prompt)
         while num_tokens < max_new_tokens:
-            outs = self.forward(image,processed_prompt+pred_tokens,batch_size=1).to(self.device)
+            with torch.no_grad():
+                outs = self.forward(image,processed_prompt+pred_tokens,batch_size=1).to(self.device)
 
             pred_token_id = torch.argmax(outs[:,-1,:]).to(self.device)
             pred_token = self.tokenizer.decode(pred_token_id)
@@ -177,8 +198,13 @@ class vicuna_llava(LlamaForCausalLM, PyTorchModelHubMixin, object):
                     input = self.process_prompt(input)
                     tokenized_input = self.tokenize(input)
 
-                    # forward pass through model, measure loss
-                    outs = self.forward(batchimage, input, batch_size=batch_size)
+                    # forward pass through model, measure loss.
+                    # During stage 2, I've already encoded the images so set encode_image=False
+                    if stage==1:
+                        outs = self.forward(batchimage, input, batch_size=batch_size)
+                    else:
+                        outs = self.forward(batchimage, input, batch_size=batch_size, encode_image=False)
+
                     loss = outs['loss']/grad_accu_steps
 
                     # append loss, update batchiter, progress bar, compute backprop
@@ -216,7 +242,7 @@ class vicuna_llava(LlamaForCausalLM, PyTorchModelHubMixin, object):
 
 
 
-class dataset_llava(Dataset):
+class dataset_pretrain(Dataset):
     def __init__(self, prompts_file:str, images_dir:str):
         super().__init__()
         with open(prompts_file, 'r') as file:
@@ -232,5 +258,47 @@ class dataset_llava(Dataset):
         prompt = self.prompts[idx]['conversations'][0]['value']
         resp = self.prompts[idx]['conversations'][1]['value']
 
+
+        return prompt, image, resp
+
+class dataset_instruct(Dataset):
+    def __init__(self, prompts_file:str, images_dir:str, vision_tower):
+        super().__init__()
+        with open(prompts_file, 'r') as file:
+            self.prompts = json.load(file)
+        self.images_dir = images_dir
+        self.vision_tower = vision_tower
+
+    def __len__(self):
+        return len(self.prompts)
+
+    def __getitem__(self, idx):
+        img_path = os.path.join(self.images_dir)
+        # this is a bit non-ideal here, I'm adding the vision_tower from vicuna_llava
+        # so __getitem__ returns images all of the same size, then I'm adding a condition
+        # to llava.staged_training that doesn't send images through vision_tower if we're
+        # in stage 2. Now to read the real images from this dataset I've added .grab()
+        img_name = self.prompts[idx]['image']
+        image_raw = read_image(img_path+img_name)
+        image = self.vision_tower(image_raw)
+
+        conversation = [conversation['value'] for conversation in self.prompts[idx]['conversations']]
+
+        # concatenate conversation with separator tokens '###'
+        prompt = '###'.join(conversation[:-1])
+        resp = conversation[-1]
+
+        return prompt, image, resp
+
+    def grab(self, idx):
+        img_path = os.path.join(self.images_dir)
+        img_name = self.prompts[idx]['image']
+        image = read_image(img_path+img_name)
+
+        # note that I'm grabbing the first and second 'conversation' elements, this is just the first
+        # prompt in the conversation and its corresponding response. .grab() is only for eval so it's 
+        # all we need
+        prompt = self.prompts[idx]['conversations'][0]['value']
+        resp = self.prompts[idx]['conversations'][1]['value']
 
         return prompt, image, resp
