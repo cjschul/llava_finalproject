@@ -50,7 +50,10 @@ Performance evaluation is conducted through:
 This project is available under standard open-source licensing terms.
 
 Citations:
+
 [1] Haotian Liu, Chunyuan Li, Qingyang Wu, and Yong Jae Lee. Visual Instruction Tuning. arXiv preprint arXiv:2304.08485, 2023.
+
 [2] Tsung-Yi Lin, Michael Maire, Serge Belongie, Lubomir Bourdev, Ross Girshick, James Hays, Pietro Perona, Deva Ramanan, Piotr Dollár, and C. Lawrence Zitnick. Microsoft COCO: Common Objects in Context. arXiv preprint arXiv:1405.0312, 2014.
+
 [3] Ankit Singh. SkyView: An Aerial Landscape Dataset. Kaggle Dataset, 2023. Available at: https://www.kaggle.com/datasets/ankit1743/skyview-an-aerial-landscape-dataset
 
