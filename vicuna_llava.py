@@ -42,7 +42,6 @@ class llava(LlamaForCausalLM, PyTorchModelHubMixin, object):
         self.model.set_input_embeddings(nn.Identity())
 
 
-
     def tokenize(self, prompt):
         return self.tokenizer(prompt, return_tensors='pt',
                                         padding='longest',
@@ -73,7 +72,7 @@ class llava(LlamaForCausalLM, PyTorchModelHubMixin, object):
         
 
 
-    def forward(self, image:Tensor, prompt:str, batch_size=1, encode_image=True):
+    def forward(self, image:Tensor, prompt:str, batch_size=1, encode_image=True, temperature=0.3):
 
         # tokenize prompt and extract image features
         with torch.no_grad():
@@ -107,8 +106,8 @@ class llava(LlamaForCausalLM, PyTorchModelHubMixin, object):
             
         # send inputs through LLM, apply softmax to make outputs more clear
         with autocast():
-            llama_output = self.model.forward(input_ids=embedded_im_and_pr,attention_mask=im_and_pr_attention_mask)
-            llama_output = torch.softmax(llama_output.logits, dim=2).to(self.device)
+            llama_output = self.model.forward(input_ids=embedded_im_and_pr,attention_mask=im_and_pr_attention_mask) 
+            llama_output = torch.softmax(llama_output.logits/temperature, dim=2).to(self.device)
 
         # if we are training, compute causal language modeling loss
         if self.training:
@@ -140,20 +139,19 @@ class llava(LlamaForCausalLM, PyTorchModelHubMixin, object):
             return {'outs':llama_output.to(self.device), 'loss':loss_per_sample}
         else:
             return llama_output.to(self.device)
-    
 
-
-    def generate(self, image:Tensor, prompt:str, max_new_tokens=50, batch_size=1):
+    def generate(self, image:Tensor, prompt:str, max_new_tokens=50, batch_size=1, temperature=0.3):
         self.training=False
         num_tokens = 0
         pred_tokens = ''
         eos_token = self.tokenizer.special_tokens_map['eos_token']
+    
         processed_prompt = self.process_prompt(prompt)
         while num_tokens < max_new_tokens:
             with torch.no_grad():
-                outs = self.forward(image,processed_prompt+pred_tokens,batch_size=1).to(self.device)
+                outs = self.forward(image,processed_prompt+pred_tokens,batch_size=1,temperature=temperature).to(self.device)
 
-            pred_token_id = torch.argmax(outs[:,-1,:]).to(self.device)
+            pred_token_id = torch.multinomial(outs[:,-1,:],1)[0]#torch.argmax(outs[:,-1,:]).to(self.device)
             pred_token = self.tokenizer.decode(pred_token_id)
 
             pred_tokens+=pred_token
